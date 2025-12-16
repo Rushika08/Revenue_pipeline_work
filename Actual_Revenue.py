@@ -2,21 +2,37 @@ import os
 import re
 import pandas as pd
 from sqlalchemy import create_engine
+import urllib
+from dotenv import load_dotenv
+
+# ✅ Load environment variables
+load_dotenv()
 
 # -------------------------------------------------------------
 # 1. SQL SERVER CONNECTION
 # -------------------------------------------------------------
-server = r'localhost\RUSH'
-database = 'DevServer'
-username = 'sa'
-password = 'Qwertyui123#'
+# 🔐 Read credentials from .env
+server = os.getenv("DB_SERVER")
+database = os.getenv("DB_NAME")
+username = os.getenv("DB_USER")
+password = os.getenv("DB_PASSWORD")
 
-connection_string = (
-    f"mssql+pyodbc://{username}:{password}@{server}/{database}"
-    "?driver=ODBC+Driver+17+for+SQL+Server"
+# 🚨 Safety check
+if not all([server, database, username, password]):
+    raise ValueError("❌ Database environment variables not loaded")
+
+# ✅ WORKING SQLALCHEMY CONNECTION (odbc_connect)
+params = urllib.parse.quote_plus(
+    f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+    f"SERVER={server};"
+    f"DATABASE={database};"
+    f"UID={username};"
+    f"PWD={password};"
+    "TrustServerCertificate=yes;"
+    "Encrypt=no;"
 )
 
-engine = create_engine(connection_string)
+engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
 print("✅ Connection established with SQL Server.")
 
 # -------------------------------------------------------------
