@@ -1,0 +1,112 @@
+WITH RECURSIVE wh_track (
+    idx,
+    whs_track,
+    key_cuo,
+    key_year,
+    ide_reg_nbr,
+    hsc_8,
+    whs_cod,
+    whs_nam,
+    itm_des,
+    qty_beg,
+    qty_out,
+    beg_dat,
+    out_dat,
+    end_dat,
+    next_reg_nbr,
+    next_reg_year,
+    next_reg_cuo,
+    next_lnk_tpt
+) AS (
+
+    /* =====================================================
+       LEVEL 0 – CURRENT WAREHOUSE (START POINT)
+       ===================================================== */
+    SELECT
+        ROW_NUMBER() OVER (
+            PARTITION BY swi.KEY_CUO, swi.KEY_YEAR, swi.IDE_REG_NBR, SUBSTR(swi.HSC_COD,1,8)
+            ORDER BY swi.BEG_DAT DESC
+        )                        AS idx,
+        0                        AS whs_track,
+        swi.KEY_CUO,
+        swi.KEY_YEAR,
+        swi.IDE_REG_NBR,
+        SUBSTR(swi.HSC_COD,1,8)   AS hsc_8,
+        swi.WHS_COD,
+        wm.OWN_NAM                AS whs_nam,
+        si.GDS_DSC                AS itm_des,
+        swi.QTY_BEG,
+        swi.QTY_OUT,
+        swi.BEG_DAT,
+        swi.OUT_DAT,
+        swi.END_DAT,
+        wm.REG_NBR,
+        wm.REG_YEA,
+        wm.OFF_COD,
+        si.LNK_TPT
+    FROM awunadm.SUS_WH_IN swi
+    JOIN awunadm.SAD_GENERAL_SEGMENT sgs
+        ON sgs.IDE_REG_NBR = swi.IDE_REG_NBR
+       AND sgs.IDE_CUO_COD = swi.KEY_CUO
+       AND sgs.DEC_REF_YER = swi.KEY_YEAR
+    JOIN awunadm.SAD_ITEM si
+        ON si.INSTANCEID = sgs.INSTANCEID
+       AND si.TAR_HSC_NB1 = SUBSTR(swi.HSC_COD,1,8)
+    LEFT JOIN awunadm.WHS_MVT wm
+        ON wm.REFER = si.LNK_TPT
+
+    /* =====================================================
+       RECURSIVE PART – PREVIOUS WAREHOUSES
+       ===================================================== */
+    UNION ALL
+
+    SELECT
+        wt.idx,
+        wt.whs_track + 1,
+        swi.KEY_CUO,
+        swi.KEY_YEAR,
+        swi.IDE_REG_NBR,
+        wt.hsc_8,
+        swi.WHS_COD,
+        wm.OWN_NAM,
+        si.GDS_DSC,
+        swi.QTY_BEG,
+        swi.QTY_OUT,
+        swi.BEG_DAT,
+        swi.OUT_DAT,
+        swi.END_DAT,
+        wm.REG_NBR,
+        wm.REG_YEA,
+        wm.OFF_COD,
+        si.LNK_TPT
+    FROM wh_track wt
+    JOIN awunadm.SUS_WH_IN swi
+        ON swi.IDE_REG_NBR = wt.next_reg_nbr
+       AND swi.KEY_YEAR    = wt.next_reg_year
+       AND swi.KEY_CUO     = wt.next_reg_cuo
+       AND SUBSTR(swi.HSC_COD,1,8) = wt.hsc_8
+    JOIN awunadm.SAD_GENERAL_SEGMENT sgs
+        ON sgs.IDE_REG_NBR = swi.IDE_REG_NBR
+       AND sgs.IDE_CUO_COD = swi.KEY_CUO
+       AND sgs.DEC_REF_YER = swi.KEY_YEAR
+    JOIN awunadm.SAD_ITEM si
+        ON si.INSTANCEID = sgs.INSTANCEID
+       AND si.TAR_HSC_NB1 = wt.hsc_8
+    LEFT JOIN awunadm.WHS_MVT wm
+        ON wm.REFER = si.LNK_TPT
+    WHERE wt.next_reg_nbr IS NOT NULL
+)
+
+SELECT
+    idx,
+    whs_track,
+    whs_cod,
+    whs_nam,
+    hsc_8      AS hsc_cod,
+    itm_des,
+    qty_beg,
+    qty_out,
+    beg_dat,
+    out_dat,
+    end_dat
+FROM wh_track;
