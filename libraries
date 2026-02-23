@@ -1,0 +1,1 @@
+pip install pandas openpyxl xlrd sqlalchemy pyodbc python-dotenv selenium webdriver-manager
