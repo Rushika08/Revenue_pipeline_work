@@ -1,0 +1,1 @@
+python main.py --onedrive-url "https://cslw-my.sharepoint.com/:f:/g/personal/dat_support_creativesoftware_com/IgDWPO9nHYSlRJ7xhTR-ARqiAYqjQ6KEiY2_IsA8IaBlmYw" --onedrive-password "password" --chromedriver "C:\Users\rushika\Downloads\chromedriver-win64\chromedriver-win64\chromedriver.exe" --no-headless --download-wait 60
