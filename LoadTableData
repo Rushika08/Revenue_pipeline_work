@@ -1,0 +1,294 @@
+CREATE OR ALTER PROCEDURE [InsightStaging].[LoadTableDataNew]
+(
+      @TableName NVARCHAR(128)
+    , @LoadType  NVARCHAR(10)     -- FULL or CDC
+    , @DaysBack  INT = 1
+    , @BatchSize INT = 100000
+)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    ------------------------------------------------------------
+    -- Variable Declaration
+    ------------------------------------------------------------
+
+    DECLARE
+          @targetSchema        NVARCHAR(128)
+        , @targetTable         NVARCHAR(128)
+        , @sourceSqlTemplate   NVARCHAR(MAX)
+        , @preparedSql         NVARCHAR(MAX)  -- static placeholders replaced
+        , @loopSql             NVARCHAR(MAX)  -- batch-level replacement
+        , @execSql             NVARCHAR(MAX)
+        , @rowsAffected        BIGINT = 0
+        , @batchRows           BIGINT = 0
+        , @logId               BIGINT
+        , @startTime           DATETIME2(3) = SYSUTCDATETIME()
+        , @endTime             DATETIME2(3)
+        , @errorMsg            NVARCHAR(MAX)
+        , @mergeKey            NVARCHAR(500)
+        , @columnListOracle    NVARCHAR(MAX)
+        , @insertColumns       NVARCHAR(MAX)
+        , @insertValues        NVARCHAR(MAX)
+        , @updateColumns       NVARCHAR(MAX)
+        , @mergeConditions     NVARCHAR(MAX);
+
+    ------------------------------------------------------------
+    -- STEP 1: Insert Initial Log
+    ------------------------------------------------------------
+
+    INSERT INTO InsightStaging.ETL_Log
+    (
+          TableName
+        , LoadType
+        , Status
+        , Description
+        , StartTime
+    )
+    VALUES
+    (
+          @TableName,
+          @LoadType,
+          'STARTED',
+          'ETL execution started',
+          @startTime
+    );
+
+    SET @logId = SCOPE_IDENTITY();
+
+    BEGIN TRY
+
+        ------------------------------------------------------------
+        -- STEP 2: Fetch Metadata
+        ------------------------------------------------------------
+
+        SELECT
+              @targetSchema      = TargetSchema
+            , @targetTable       = TargetTable
+            , @sourceSqlTemplate =
+                CASE
+                    WHEN UPPER(@LoadType) = 'FULL' THEN FLQuery
+                    WHEN UPPER(@LoadType) = 'CDC'  THEN CDCQuery
+                END
+            , @mergeKey =
+                CASE
+                    WHEN UPPER(@LoadType) = 'CDC'
+                    THEN cdc_merge_key
+                END
+        FROM InsightStaging.ETL_TableControl
+        WHERE TableName = @TableName;
+
+        IF @targetSchema IS NULL
+            THROW 50001, 'Missing metadata for table', 1;
+
+        ------------------------------------------------------------
+        -- STEP 3: Read Target Column Metadata
+        ------------------------------------------------------------
+
+        DECLARE @cols TABLE
+        (
+              ColumnName SYSNAME
+            , Ordinal    INT
+        );
+
+        INSERT INTO @cols
+        SELECT COLUMN_NAME, ORDINAL_POSITION
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = @targetSchema
+        AND   TABLE_NAME   = @targetTable;
+
+        SELECT
+              @columnListOracle =
+                    STRING_AGG(ColumnName, ', ')
+                    WITHIN GROUP (ORDER BY Ordinal),
+
+              @insertColumns =
+                    STRING_AGG(QUOTENAME(ColumnName), ', ')
+                    WITHIN GROUP (ORDER BY Ordinal),
+
+              @insertValues =
+                    STRING_AGG('source.' + QUOTENAME(ColumnName), ', ')
+                    WITHIN GROUP (ORDER BY Ordinal)
+        FROM @cols;
+
+        ------------------------------------------------------------
+        -- STEP 4: Replace STATIC Placeholders (ONLY ONCE)
+        ------------------------------------------------------------
+
+        SET @preparedSql = @sourceSqlTemplate;
+
+        -- Replace outer column list
+        IF CHARINDEX('COLUMN_LIST', @preparedSql) > 0
+            SET @preparedSql =
+                REPLACE(@preparedSql, 'COLUMN_LIST', @columnListOracle);
+
+        -- Replace inner Oracle column list
+        IF CHARINDEX('COLUMN_LIST2', @preparedSql) > 0
+            SET @preparedSql =
+                REPLACE(@preparedSql, 'COLUMN_LIST2', @columnListOracle);
+
+        -- Replace CDC date variable
+        IF UPPER(@LoadType) = 'CDC'
+        BEGIN
+            IF CHARINDEX('DAYS_VARIABLE', @preparedSql) > 0
+                SET @preparedSql =
+                    REPLACE(@preparedSql,
+                            'DAYS_VARIABLE',
+                            CAST(@DaysBack AS NVARCHAR(10)));
+        END
+
+        ------------------------------------------------------------
+        -- STEP 5: FULL LOAD
+        ------------------------------------------------------------
+
+        IF UPPER(@LoadType) = 'FULL'
+        BEGIN
+
+            DECLARE @supportsBatching BIT =
+                CASE
+                    WHEN CHARINDEX('BATCHSIZE',   @sourceSqlTemplate) > 0
+                     AND CHARINDEX('BATCHOFFSET', @sourceSqlTemplate) > 0
+                    THEN 1 ELSE 0
+                END;
+
+            -- Truncate Target Table
+            SET @execSql =
+                'TRUNCATE TABLE '
+                + QUOTENAME(@targetSchema) + '.'
+                + QUOTENAME(@targetTable);
+
+            EXEC (@execSql);
+
+            IF @supportsBatching = 1
+            BEGIN
+                DECLARE @offset BIGINT = 0;
+
+                WHILE (1 = 1)
+                BEGIN
+                    SET @loopSql = @preparedSql;
+
+                    SET @loopSql =
+                        REPLACE(@loopSql, 'BATCHSIZE', @BatchSize);
+
+                    SET @loopSql =
+                        REPLACE(@loopSql, 'BATCHOFFSET', @offset);
+
+                    SET @execSql = '
+                        INSERT INTO '
+                        + QUOTENAME(@targetSchema) + '.'
+                        + QUOTENAME(@targetTable) + '
+                        (' + @insertColumns + ')
+                        SELECT ' + @columnListOracle + '
+                        FROM (' + @loopSql + ') source';
+
+                    EXEC sp_executesql @execSql;
+
+                    SET @batchRows = @@ROWCOUNT;
+                    SET @rowsAffected += @batchRows;
+
+                    IF @batchRows < @BatchSize BREAK;
+
+                    SET @offset += @BatchSize;
+                END
+            END
+            ELSE
+            BEGIN
+                SET @execSql = '
+                    INSERT INTO '
+                    + QUOTENAME(@targetSchema) + '.'
+                    + QUOTENAME(@targetTable) + '
+                    (' + @insertColumns + ')
+                    SELECT ' + @columnListOracle + '
+                    FROM (' + @preparedSql + ') source';
+
+                EXEC sp_executesql @execSql;
+
+                SET @rowsAffected = @@ROWCOUNT;
+            END
+
+            SET @endTime = SYSUTCDATETIME();
+
+            UPDATE InsightStaging.ETL_Log
+            SET Status = 'COMPLETED',
+                RowsInserted = @rowsAffected,
+                EndTime = @endTime
+            WHERE LogId = @logId;
+
+            RETURN;
+        END
+
+        ------------------------------------------------------------
+        -- STEP 6: CDC LOAD (MERGE)
+        ------------------------------------------------------------
+
+        IF UPPER(@LoadType) = 'CDC'
+        AND @mergeKey IS NOT NULL
+        AND LEN(@mergeKey) > 0
+        BEGIN
+            DECLARE @keyColumns TABLE(KeyCol SYSNAME);
+
+            INSERT INTO @keyColumns
+            SELECT LTRIM(RTRIM(value))
+            FROM STRING_SPLIT(@mergeKey, ',');
+
+            SELECT
+                @mergeConditions =
+                    STRING_AGG(
+                        'target.' + QUOTENAME(KeyCol)
+                        + ' = source.' + QUOTENAME(KeyCol),
+                        ' AND ')
+            FROM @keyColumns;
+
+            SELECT
+                @updateColumns =
+                    STRING_AGG(
+                        'target.' + QUOTENAME(ColumnName)
+                        + ' = source.' + QUOTENAME(ColumnName),
+                        ', ')
+            FROM @cols
+            WHERE ColumnName NOT IN
+                  (SELECT KeyCol FROM @keyColumns);
+
+            SET @execSql = '
+                MERGE '
+                + QUOTENAME(@targetSchema) + '.'
+                + QUOTENAME(@targetTable) + ' target
+                USING (' + @preparedSql + ') source
+                ON ' + @mergeConditions + '
+                WHEN MATCHED THEN
+                    UPDATE SET ' + @updateColumns + '
+                WHEN NOT MATCHED THEN
+                    INSERT (' + @insertColumns + ')
+                    VALUES (' + @insertValues + ');';
+
+            EXEC sp_executesql @execSql;
+
+            SET @rowsAffected = @@ROWCOUNT;
+        END
+
+        ------------------------------------------------------------
+        -- STEP 7: Success Log
+        ------------------------------------------------------------
+
+        SET @endTime = SYSUTCDATETIME();
+
+        UPDATE InsightStaging.ETL_Log
+        SET Status = 'COMPLETED',
+            RowsInserted = @rowsAffected,
+            EndTime = @endTime
+        WHERE LogId = @logId;
+
+    END TRY
+    BEGIN CATCH
+        SET @errorMsg = ERROR_MESSAGE();
+        SET @endTime  = SYSUTCDATETIME();
+
+        UPDATE InsightStaging.ETL_Log
+        SET Status = 'FAILED',
+            ErrorMessage = @errorMsg,
+            EndTime = @endTime
+        WHERE LogId = @logId;
+
+        THROW;
+    END CATCH
+END
