@@ -17,8 +17,8 @@ BEGIN
           @targetSchema        NVARCHAR(128)
         , @targetTable         NVARCHAR(128)
         , @sourceSqlTemplate   NVARCHAR(MAX)
-        , @preparedSql         NVARCHAR(MAX)  -- static placeholders replaced
-        , @loopSql             NVARCHAR(MAX)  -- batch-level replacement
+        , @preparedSql         NVARCHAR(MAX)
+        , @loopSql             NVARCHAR(MAX)
         , @execSql             NVARCHAR(MAX)
         , @rowsAffected        BIGINT = 0
         , @batchRows           BIGINT = 0
@@ -39,19 +39,17 @@ BEGIN
 
     INSERT INTO InsightStaging.ETL_Log
     (
-          TableName
-        , LoadType
-        , Status
-        , Description
-        , StartTime
+        TableName,
+        LoadType,
+        StartTime,
+        Status
     )
     VALUES
     (
-          @TableName,
-          @LoadType,
-          'STARTED',
-          'ETL execution started',
-          @startTime
+        @TableName,
+        @LoadType,
+        @startTime,
+        'STARTED'
     );
 
     SET @logId = SCOPE_IDENTITY();
@@ -112,29 +110,23 @@ BEGIN
         FROM @cols;
 
         ------------------------------------------------------------
-        -- STEP 4: Replace STATIC Placeholders (ONLY ONCE)
+        -- STEP 4: Replace Static Placeholders
         ------------------------------------------------------------
 
         SET @preparedSql = @sourceSqlTemplate;
 
-        -- Replace outer column list
-        IF CHARINDEX('COLUMN_LIST', @preparedSql) > 0
-            SET @preparedSql =
-                REPLACE(@preparedSql, 'COLUMN_LIST', @columnListOracle);
+        SET @preparedSql =
+            REPLACE(@preparedSql, 'COLUMN_LIST', @columnListOracle);
 
-        -- Replace inner Oracle column list
-        IF CHARINDEX('COLUMN_LIST2', @preparedSql) > 0
-            SET @preparedSql =
-                REPLACE(@preparedSql, 'COLUMN_LIST2', @columnListOracle);
+        SET @preparedSql =
+            REPLACE(@preparedSql, 'COLUMN_LIST2', @columnListOracle);
 
-        -- Replace CDC date variable
         IF UPPER(@LoadType) = 'CDC'
         BEGIN
-            IF CHARINDEX('DAYS_VARIABLE', @preparedSql) > 0
-                SET @preparedSql =
-                    REPLACE(@preparedSql,
-                            'DAYS_VARIABLE',
-                            CAST(@DaysBack AS NVARCHAR(10)));
+            SET @preparedSql =
+                REPLACE(@preparedSql,
+                        'DAYS_VARIABLE',
+                        CAST(@DaysBack AS NVARCHAR(10)));
         END
 
         ------------------------------------------------------------
@@ -143,7 +135,6 @@ BEGIN
 
         IF UPPER(@LoadType) = 'FULL'
         BEGIN
-
             DECLARE @supportsBatching BIT =
                 CASE
                     WHEN CHARINDEX('BATCHSIZE',   @sourceSqlTemplate) > 0
@@ -151,7 +142,7 @@ BEGIN
                     THEN 1 ELSE 0
                 END;
 
-            -- Truncate Target Table
+            -- Truncate Target
             SET @execSql =
                 'TRUNCATE TABLE '
                 + QUOTENAME(@targetSchema) + '.'
@@ -202,23 +193,11 @@ BEGIN
                     FROM (' + @preparedSql + ') source';
 
                 EXEC sp_executesql @execSql;
-
-                SET @rowsAffected = @@ROWCOUNT;
             END
-
-            SET @endTime = SYSUTCDATETIME();
-
-            UPDATE InsightStaging.ETL_Log
-            SET Status = 'COMPLETED',
-                RowsInserted = @rowsAffected,
-                EndTime = @endTime
-            WHERE LogId = @logId;
-
-            RETURN;
         END
 
         ------------------------------------------------------------
-        -- STEP 6: CDC LOAD (MERGE)
+        -- STEP 6: CDC LOAD
         ------------------------------------------------------------
 
         IF UPPER(@LoadType) = 'CDC'
@@ -262,21 +241,18 @@ BEGIN
                     VALUES (' + @insertValues + ');';
 
             EXEC sp_executesql @execSql;
-
-            SET @rowsAffected = @@ROWCOUNT;
         END
 
         ------------------------------------------------------------
-        -- STEP 7: Success Log
+        -- STEP 7: Success Log Update
         ------------------------------------------------------------
 
         SET @endTime = SYSUTCDATETIME();
 
         UPDATE InsightStaging.ETL_Log
         SET Status = 'COMPLETED',
-            RowsInserted = @rowsAffected,
             EndTime = @endTime
-        WHERE LogId = @logId;
+        WHERE LogID = @logId;
 
     END TRY
     BEGIN CATCH
@@ -287,7 +263,7 @@ BEGIN
         SET Status = 'FAILED',
             ErrorMessage = @errorMsg,
             EndTime = @endTime
-        WHERE LogId = @logId;
+        WHERE LogID = @logId;
 
         THROW;
     END CATCH
